@@ -1,12 +1,12 @@
 ---
 hostname: drone-pi-02
 
-# Fill these values for the second Pi.
-lte_iface: wwp1s0u1u3i2
-lte_ip: 178.160.252.X
+# Fill these unique operator-assigned values for the second Pi.
+# lte_iface_override: wwan0  # Optional only if automatic detection fails.
+lte_ip: REPLACE_WITH_STATIC_IP
 lte_prefix: 30
-lte_gateway: 178.160.252.Y
-lte_network: 178.160.252.Z/30
+lte_gateway: REPLACE_WITH_GATEWAY
+lte_network: REPLACE_WITH_NETWORK/30
 lte_table: 100
 lte_apn: internet
 

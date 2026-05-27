@@ -1,0 +1,12 @@
+[Unit]
+Description=MAVLink Router for swarm node
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={{ mavlink_router_binary.stdout | trim }} -c /etc/mavlink-router/main.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

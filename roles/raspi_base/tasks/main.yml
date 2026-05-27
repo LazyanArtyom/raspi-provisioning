@@ -1,21 +1,24 @@
 ---
-- name: Validate required LTE variables
+- name: Validate required per-host LTE variables
   ansible.builtin.assert:
     that:
       - hostname is defined
-      - lte_iface is defined
       - lte_ip is defined
       - lte_gateway is defined
       - lte_network is defined
       - lte_table is defined
       - lte_apn is defined
-    fail_msg: "Missing per-host LTE variables. Check host_vars/{{ inventory_hostname }}.yml"
+      - hostname | length > 0
+      - lte_ip | length > 0
+      - lte_gateway | length > 0
+      - lte_network | length > 0
+    fail_msg: "Missing per-host LTE values. Check host_vars/{{ inventory_hostname }}.yml."
 
 - name: Set hostname
   ansible.builtin.hostname:
     name: "{{ hostname }}"
 
-- name: Update /etc/hosts hostname mapping
+- name: Update local hostname mapping
   ansible.builtin.lineinfile:
     path: /etc/hosts
     regexp: "^127\\.0\\.1\\.1\\s+"
@@ -23,13 +26,14 @@
     create: true
     mode: "0644"
 
-- name: Install common packages
+- name: Install common operating system packages
   ansible.builtin.apt:
     name: "{{ packages_common }}"
     state: present
     update_cache: true
+    cache_valid_time: 3600
 
-- name: Enable base services
+- name: Ensure required services are enabled and running
   ansible.builtin.systemd:
     name: "{{ item }}"
     enabled: true
@@ -39,66 +43,393 @@
     - NetworkManager
     - ModemManager
 
-- name: Configure SSH ports
+- name: Ensure SSH drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Configure SSH listening ports and addresses
   ansible.builtin.template:
     src: ssh_ports.conf.j2
     dest: /etc/ssh/sshd_config.d/99-ports.conf
     owner: root
     group: root
     mode: "0644"
-  notify: Restart ssh
+  notify: Reload validated ssh configuration
 
-- name: Validate sshd configuration
-  ansible.builtin.command: sshd -t
+- name: Validate complete SSH daemon configuration before reload
+  ansible.builtin.command: /usr/sbin/sshd -t
   changed_when: false
 
-- name: Configure reverse-path filtering for LTE policy routing
+- name: Apply validated SSH configuration without dropping sessions
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait briefly for Telit modem discovery in ModemManager
+  ansible.builtin.command: mmcli --list-modems
+  register: modem_list_initial
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+  until: "'/org/freedesktop/ModemManager1/Modem/' in (modem_list_initial.stdout | default(''))"
+  retries: 3
+  delay: "{{ modem_detect_delay }}"
+
+- name: Recover ModemManager discovery without changing NetworkManager
+  when: "'/org/freedesktop/ModemManager1/Modem/' not in (modem_list_initial.stdout | default(''))"
+  block:
+    - name: Trigger device events for already enumerated modem hardware
+      ansible.builtin.command: udevadm trigger --subsystem-match=usb --action=add
+      changed_when: true
+
+    - name: Wait for triggered device events
+      ansible.builtin.command: udevadm settle
+      changed_when: false
+
+    - name: Restart ModemManager after unsuccessful initial discovery
+      ansible.builtin.systemd:
+        name: ModemManager
+        state: restarted
+
+- name: Wait for modem to appear after safe recovery attempt
+  ansible.builtin.command: mmcli --list-modems
+  register: modem_list
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+  until: "'/org/freedesktop/ModemManager1/Modem/' in (modem_list.stdout | default(''))"
+  retries: "{{ modem_detect_retries }}"
+  delay: "{{ modem_detect_delay }}"
+
+- name: Collect modem discovery failure diagnostics
+  ansible.builtin.shell: |
+    set +e
+    printf '%s\n' '===== lsusb ====='
+    lsusb
+    printf '%s\n' '===== ip link ====='
+    ip link
+    printf '%s\n' '===== modem device nodes ====='
+    ls -l /dev/cdc-wdm* /dev/ttyUSB*
+    printf '%s\n' '===== kernel modem messages ====='
+    dmesg | grep -Ei 'telit|qmi|wwan|cdc|ttyUSB|option'
+    printf '%s\n' '===== ModemManager / NetworkManager journal ====='
+    journalctl -u ModemManager -u NetworkManager --no-pager -n 100
+  args:
+    executable: /bin/bash
+  register: modem_failure_diagnostics
+  changed_when: false
+  failed_when: false
+  when: "'/org/freedesktop/ModemManager1/Modem/' not in (modem_list.stdout | default(''))"
+
+- name: Print modem discovery failure diagnostics
+  ansible.builtin.debug:
+    var: modem_failure_diagnostics.stdout_lines
+  when: "'/org/freedesktop/ModemManager1/Modem/' not in (modem_list.stdout | default(''))"
+
+- name: Require a modem visible to ModemManager
+  ansible.builtin.assert:
+    that:
+      - "'/org/freedesktop/ModemManager1/Modem/' in (modem_list.stdout | default(''))"
+    fail_msg: >-
+      ModemManager could not discover the Telit modem after a udev trigger and a
+      safe ModemManager restart. See the diagnostics printed above; NetworkManager
+      was deliberately left running to preserve Wi-Fi SSH.
+
+- name: Select discovered modem identifier
+  ansible.builtin.set_fact:
+    detected_modem_id: "{{ modem_list.stdout | regex_findall('/Modem/([0-9]+)') | first }}"
+
+- name: Read detected modem details and exported ports
+  ansible.builtin.command: "mmcli --modem {{ detected_modem_id }}"
+  register: modem_details
+  changed_when: false
+
+- name: Require the expected Telit modem model
+  ansible.builtin.assert:
+    that:
+      - modem_details.stdout is search('Telit|LE910')
+    fail_msg: "A modem was found, but it does not appear to be the expected Telit LE910 modem."
+
+- name: Parse LTE network interface exported by ModemManager
+  ansible.builtin.set_fact:
+    modemmanager_lte_iface: >-
+      {{ (modem_details.stdout | regex_findall('([A-Za-z0-9_.:-]+)\s+\(net\)') | first)
+         | default('', true) }}
+
+- name: Discover qmi_wwan network interface from sysfs as a fallback
+  ansible.builtin.shell: |
+    for net_path in /sys/class/net/*; do
+        [ -e "$net_path/device/driver" ] || continue
+        if [ "$(basename "$(readlink -f "$net_path/device/driver")")" = "qmi_wwan" ]; then
+            basename "$net_path"
+            exit 0
+        fi
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  register: qmi_sysfs_interface
+  changed_when: false
+
+- name: Record optional interface override
+  ansible.builtin.set_fact:
+    requested_lte_iface: "{{ lte_iface_override | default(lte_iface | default('', true), true) }}"
+
+- name: Warn about legacy LTE interface override variable
+  ansible.builtin.debug:
+    msg: "Use lte_iface_override instead of legacy lte_iface; automatic detection is preferred."
+  when:
+    - lte_iface is defined
+    - lte_iface_override is not defined
+
+- name: Choose LTE interface for this host
+  ansible.builtin.set_fact:
+    detected_lte_iface: >-
+      {{ requested_lte_iface if requested_lte_iface | length > 0 else
+         (modemmanager_lte_iface if modemmanager_lte_iface | length > 0 else
+         (qmi_sysfs_interface.stdout | trim)) }}
+
+- name: Require a usable LTE network interface
+  ansible.builtin.command: "ip link show dev {{ detected_lte_iface }}"
+  register: lte_interface_link
+  changed_when: false
+  failed_when: false
+  when: detected_lte_iface | length > 0
+
+- name: Validate automatically detected LTE interface
+  ansible.builtin.assert:
+    that:
+      - detected_lte_iface | length > 0
+      - lte_interface_link.rc | default(1) == 0
+    fail_msg: >-
+      No LTE network interface could be selected. ModemManager ports were:
+      {{ modem_details.stdout | default('unavailable') }}.
+      Set lte_iface_override only if the Telit net interface is known manually.
+
+- name: Report selected Telit LTE interface
+  ansible.builtin.debug:
+    msg: "Using LTE interface {{ detected_lte_iface }} for modem {{ detected_modem_id }}."
+
+- name: Write persistent reverse path filtering settings
   ansible.builtin.template:
     src: lte_sysctl.conf.j2
     dest: /etc/sysctl.d/99-lte-policy-routing.conf
     owner: root
     group: root
     mode: "0644"
-  notify: Reload sysctl
+  notify: Apply LTE sysctl settings
 
-- name: Apply sysctl immediately
-  ansible.builtin.command: sysctl --system
+- name: Apply any changed persistent reverse path filtering settings
+  ansible.builtin.meta: flush_handlers
+
+- name: Read active reverse path filtering settings
+  ansible.builtin.command: "sysctl -n {{ item }}"
+  loop:
+    - net.ipv4.conf.all.rp_filter
+    - net.ipv4.conf.default.rp_filter
+    - "net.ipv4.conf.{{ wifi_iface }}.rp_filter"
+    - "net.ipv4.conf.{{ detected_lte_iface }}.rp_filter"
+  register: rp_filter_values
+  changed_when: false
+  failed_when: false
+
+- name: Correct active reverse path filtering values if needed
+  ansible.builtin.command: "sysctl -w {{ item.item }}=0"
+  loop: "{{ rp_filter_values.results }}"
+  when: item.rc != 0 or (item.stdout | trim) != '0'
   changed_when: true
 
-- name: Check existing NetworkManager connections
-  ansible.builtin.command: nmcli -t -f NAME connection show
+- name: Define NetworkManager LTE policy values
+  ansible.builtin.set_fact:
+    lte_desired_routes: >-
+      {{ lte_network }} table={{ lte_table }},
+      0.0.0.0/0 {{ lte_gateway }} table={{ lte_table }}
+    lte_desired_rule: "priority {{ lte_rule_priority }} from {{ lte_ip }}/32 table {{ lte_table }}"
+
+- name: List existing NetworkManager connection profiles
+  ansible.builtin.command: nmcli --get-values NAME connection show
   register: nm_connections
   changed_when: false
 
-- name: Create LTE GSM connection if missing
-  ansible.builtin.command: >
-    nmcli connection add type gsm ifname "*" con-name {{ lte_connection_name }} apn {{ lte_apn }}
+- name: Create NetworkManager LTE connection profile when absent
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - add
+      - type
+      - gsm
+      - ifname
+      - "*"
+      - con-name
+      - "{{ lte_connection_name }}"
+      - apn
+      - "{{ lte_apn }}"
+  register: lte_connection_create
+  changed_when: true
   when: lte_connection_name not in nm_connections.stdout_lines
-  changed_when: true
 
-- name: Configure LTE connection core settings
-  ansible.builtin.command: >
-    nmcli connection modify {{ lte_connection_name }}
-    connection.autoconnect yes
-    gsm.apn {{ lte_apn }}
-    ipv4.method auto
-    ipv6.method ignore
-    ipv4.route-metric 700
-    ipv4.route-table {{ lte_table }}
-    ipv4.routing-rules "priority 100 from {{ lte_ip }}/32 table {{ lte_table }}"
-  changed_when: true
+- name: Read managed scalar values from LTE connection profile
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - --get-values
+      - "{{ item.property }}"
+      - connection
+      - show
+      - "{{ lte_connection_name }}"
+  loop:
+    - { property: connection.autoconnect, value: "yes" }
+    - { property: gsm.apn, value: "{{ lte_apn }}" }
+    - { property: ipv4.method, value: "auto" }
+    - { property: ipv4.ignore-auto-routes, value: "yes" }
+    - { property: ipv4.route-metric, value: "{{ lte_route_metric | string }}" }
+    - { property: ipv4.route-table, value: "{{ lte_table | string }}" }
+    - { property: ipv6.method, value: "{{ lte_ipv6_method }}" }
+  register: lte_scalar_current
+  changed_when: false
 
-- name: Configure LTE policy routes in NetworkManager
-  ansible.builtin.command: >
-    nmcli connection modify {{ lte_connection_name }}
-    ipv4.routes "{{ lte_network }}, 0.0.0.0/0 {{ lte_gateway }}"
+- name: Update changed scalar values in LTE connection profile
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ lte_connection_name }}"
+      - "{{ item.item.property }}"
+      - "{{ item.item.value }}"
+  loop: "{{ lte_scalar_current.results }}"
+  register: lte_scalar_updates
   changed_when: true
+  when: (item.stdout | trim) != (item.item.value | string)
+  notify: Restart LTE policy routing service
 
-- name: Bring LTE connection up
-  ansible.builtin.command: nmcli connection up {{ lte_connection_name }}
-  register: lte_up
-  changed_when: "'successfully activated' in lte_up.stdout or 'Connection successfully activated' in lte_up.stdout"
+- name: Read LTE policy routes from NetworkManager profile
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - --get-values
+      - ipv4.routes
+      - connection
+      - show
+      - "{{ lte_connection_name }}"
+  register: lte_profile_routes
+  changed_when: false
+
+- name: Configure persistent LTE routes in policy table
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ lte_connection_name }}"
+      - ipv4.routes
+      - "{{ lte_desired_routes }}"
+  register: lte_routes_update
+  changed_when: true
+  when: >-
+    lte_network not in lte_profile_routes.stdout or
+    '0.0.0.0/0' not in lte_profile_routes.stdout or
+    lte_gateway not in lte_profile_routes.stdout or
+    (lte_profile_routes.stdout is not search('table\s*=\s*' ~ (lte_table | string)))
+  notify: Restart LTE policy routing service
+
+- name: Read LTE source policy rules from NetworkManager profile
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - --get-values
+      - ipv4.routing-rules
+      - connection
+      - show
+      - "{{ lte_connection_name }}"
+  register: lte_profile_rules
+  changed_when: false
+
+- name: Configure persistent LTE source policy rule
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ lte_connection_name }}"
+      - ipv4.routing-rules
+      - "{{ lte_desired_rule }}"
+  register: lte_rule_update
+  changed_when: true
+  when: >-
+    lte_profile_rules.stdout is not search(
+    'priority\s+' ~ (lte_rule_priority | string) ~
+    '\s+from\s+' ~ lte_ip ~ '(/32)?\s+(lookup|table)\s+' ~
+    (lte_table | string))
+  notify: Restart LTE policy routing service
+
+- name: Record whether LTE connection profile was updated
+  ansible.builtin.set_fact:
+    lte_profile_changed: >-
+      {{ (lte_connection_create.changed | default(false)) or
+         (lte_scalar_updates.results | default([]) | selectattr('changed', 'equalto', true) | list | length > 0) or
+         (lte_routes_update.changed | default(false)) or
+         (lte_rule_update.changed | default(false)) }}
+
+- name: List active NetworkManager connections
+  ansible.builtin.command: nmcli --get-values NAME connection show --active
+  register: nm_active_connections
+  changed_when: false
+
+- name: Activate changed or inactive LTE connection
+  ansible.builtin.command: "nmcli connection up {{ lte_connection_name }}"
+  register: lte_activation
+  changed_when: true
   failed_when: false
+  ignore_errors: true
+  until: lte_activation.rc == 0
+  retries: 4
+  delay: 10
+  when: lte_profile_changed | bool or lte_connection_name not in nm_active_connections.stdout_lines
+
+- name: Wait until LTE interface obtains expected static address
+  ansible.builtin.command: "ip -4 -o address show dev {{ detected_lte_iface }}"
+  register: lte_address
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+  until: "lte_ip in (lte_address.stdout | default(''))"
+  retries: "{{ lte_ip_wait_retries }}"
+  delay: "{{ lte_ip_wait_delay }}"
+
+- name: Collect LTE activation diagnostics when expected address is absent
+  ansible.builtin.shell: |
+    set +e
+    printf '%s\n' '===== LTE address ====='
+    ip -4 address show dev "{{ detected_lte_iface }}"
+    printf '%s\n' '===== active NetworkManager connections ====='
+    nmcli connection show --active
+    printf '%s\n' '===== LTE NetworkManager profile ====='
+    nmcli connection show "{{ lte_connection_name }}"
+    printf '%s\n' '===== recent modem/network logs ====='
+    journalctl -u ModemManager -u NetworkManager --no-pager -n 100
+  args:
+    executable: /bin/bash
+  register: lte_activation_diagnostics
+  changed_when: false
+  failed_when: false
+  when: lte_ip not in (lte_address.stdout | default(''))
+
+- name: Print LTE activation diagnostics
+  ansible.builtin.debug:
+    var: lte_activation_diagnostics.stdout_lines
+  when: lte_ip not in (lte_address.stdout | default(''))
+
+- name: Require expected static LTE address
+  ansible.builtin.assert:
+    that:
+      - lte_ip in (lte_address.stdout | default(''))
+    fail_msg: >-
+      LTE profile {{ lte_connection_name }} did not obtain expected address
+      {{ lte_ip }} on {{ detected_lte_iface }}. See activation diagnostics above.
 
 - name: Install LTE policy routing fallback script
   ansible.builtin.template:
@@ -107,6 +438,7 @@
     owner: root
     group: root
     mode: "0755"
+  notify: Restart LTE policy routing service
 
 - name: Install LTE policy routing fallback service
   ansible.builtin.template:
@@ -115,25 +447,50 @@
     owner: root
     group: root
     mode: "0644"
+  notify: Restart LTE policy routing service
 
-- name: Enable LTE policy routing fallback service
+- name: Enable LTE policy routing fallback at boot
   ansible.builtin.systemd:
     name: lte-policy-routing.service
     enabled: true
     daemon_reload: true
 
-- name: Start LTE policy routing fallback service
+- name: Apply changes to LTE policy routing fallback service
+  ansible.builtin.meta: flush_handlers
+
+- name: Ensure LTE policy routing fallback has run
   ansible.builtin.systemd:
     name: lte-policy-routing.service
     state: started
-  failed_when: false
 
-- name: Show LTE route decision
-  ansible.builtin.command: "ip route get 1.1.1.1 from {{ lte_ip }}"
-  register: route_decision
+- name: Read route decision for traffic sourced from static LTE address
+  ansible.builtin.command: "ip -4 route get 1.1.1.1 from {{ lte_ip }}"
+  register: route_decision_initial
   changed_when: false
   failed_when: false
 
-- name: Print LTE route decision
+- name: Repair missing runtime policy routing with fallback script
+  ansible.builtin.command: /usr/local/sbin/fix-lte-policy-routing.sh
+  changed_when: true
+  when: >-
+    route_decision_initial.rc != 0 or
+    ('dev ' ~ detected_lte_iface) not in route_decision_initial.stdout or
+    ('table ' ~ (lte_table | string)) not in route_decision_initial.stdout
+
+- name: Validate route decision for LTE sourced traffic
+  ansible.builtin.command: "ip -4 route get 1.1.1.1 from {{ lte_ip }}"
+  register: route_decision
+  changed_when: false
+
+- name: Require LTE policy route to be active
+  ansible.builtin.assert:
+    that:
+      - "('dev ' ~ detected_lte_iface) in route_decision.stdout"
+      - "('table ' ~ (lte_table | string)) in route_decision.stdout"
+    fail_msg: >-
+      LTE policy routing is not active. Expected table {{ lte_table }} via
+      {{ detected_lte_iface }}, got: {{ route_decision.stdout | default('no route result') }}
+
+- name: Report validated LTE route decision
   ansible.builtin.debug:
     var: route_decision.stdout

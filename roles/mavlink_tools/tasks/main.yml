@@ -1,40 +1,138 @@
 ---
-- name: Install MAVLink-related apt packages
+- name: Install MAVLink build and runtime packages
   ansible.builtin.apt:
     name: "{{ mavlink_packages }}"
     state: present
     update_cache: true
+    cache_valid_time: 3600
 
-- name: Install MAVLink Python packages globally
+- name: Attempt safe global install of MAVLink Python tools
   ansible.builtin.pip:
     name: "{{ mavlink_python_packages }}"
     executable: pip3
     extra_args: --break-system-packages
-  register: pip_mavlink
+  register: mavlink_python_global
   failed_when: false
 
-- name: Install MAVLink Python packages in virtual environment if global install failed
-  when: pip_mavlink is failed
+- name: Probe globally installed MAVProxy command
+  ansible.builtin.command: mavproxy.py --version
+  register: mavproxy_global_probe
+  changed_when: false
+  failed_when: false
+
+- name: Install MAVLink Python tools in an isolated venv when global tools are unusable
+  when: mavproxy_global_probe.rc != 0
   block:
-    - name: Create MAVLink tools venv
+    - name: Create MAVLink tools virtual environment
       ansible.builtin.command: python3 -m venv /opt/mavlink-tools-venv
       args:
         creates: /opt/mavlink-tools-venv/bin/python
 
-    - name: Install MAVLink Python packages into venv
+    - name: Install MAVLink Python packages into virtual environment
       ansible.builtin.pip:
         name: "{{ mavlink_python_packages }}"
         virtualenv: /opt/mavlink-tools-venv
         virtualenv_command: python3 -m venv
 
-    - name: Symlink mavproxy.py
+    - name: Expose venv MAVProxy command system-wide
       ansible.builtin.file:
         src: /opt/mavlink-tools-venv/bin/mavproxy.py
         dest: /usr/local/bin/mavproxy.py
         state: link
         force: true
 
-- name: Ensure mavlink-router config directory exists
+- name: Locate MAVProxy command
+  ansible.builtin.command: which mavproxy.py
+  register: mavproxy_binary
+  changed_when: false
+  failed_when: false
+
+- name: Execute MAVProxy version check
+  ansible.builtin.command: mavproxy.py --version
+  register: mavproxy_version
+  changed_when: false
+  failed_when: false
+  when: mavproxy_binary.rc == 0
+
+- name: Require a runnable MAVProxy installation
+  ansible.builtin.assert:
+    that:
+      - mavproxy_binary.rc == 0
+      - mavproxy_version.rc | default(1) == 0
+    fail_msg: >-
+      MAVProxy is missing or cannot start after installing future, MAVProxy, and
+      pymavlink. Command output: {{ mavproxy_version.stderr | default('not found') }}
+
+- name: Check whether mavlink-routerd is already installed
+  ansible.builtin.command: which mavlink-routerd
+  register: mavlink_router_existing
+  changed_when: false
+  failed_when: false
+
+- name: Try distribution mavlink-router package first
+  ansible.builtin.apt:
+    name: mavlink-router
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: mavlink_router_apt
+  failed_when: false
+  when: mavlink_router_existing.rc != 0
+
+- name: Check for mavlink-routerd after apt attempt
+  ansible.builtin.command: which mavlink-routerd
+  register: mavlink_router_after_apt
+  changed_when: false
+  failed_when: false
+
+- name: Build mavlink-router from source if it is unavailable from apt
+  when: mavlink_router_after_apt.rc != 0
+  block:
+    - name: Checkout mavlink-router source
+      ansible.builtin.git:
+        repo: "{{ mavlink_router_repo }}"
+        dest: "{{ mavlink_router_src_dir }}"
+        version: "{{ mavlink_router_version }}"
+        update: true
+
+    - name: Configure mavlink-router Meson build
+      ansible.builtin.command:
+        argv:
+          - meson
+          - setup
+          - "{{ mavlink_router_build_dir }}"
+          - "{{ mavlink_router_src_dir }}"
+          - --buildtype=release
+      args:
+        creates: "{{ mavlink_router_build_dir }}/build.ninja"
+
+    - name: Compile mavlink-router
+      ansible.builtin.command: "ninja -C {{ mavlink_router_build_dir }}"
+      changed_when: true
+
+    - name: Install mavlink-router system-wide
+      ansible.builtin.command: "ninja -C {{ mavlink_router_build_dir }} install"
+      changed_when: true
+
+    - name: Refresh shared library cache after source install
+      ansible.builtin.command: ldconfig
+      changed_when: false
+
+- name: Locate final mavlink-routerd command
+  ansible.builtin.command: which mavlink-routerd
+  register: mavlink_router_binary
+  changed_when: false
+  failed_when: false
+
+- name: Require mavlink-routerd installation
+  ansible.builtin.assert:
+    that:
+      - mavlink_router_binary.rc == 0
+    fail_msg: >-
+      mavlink-routerd is still missing. Apt installation did not provide it and
+      the source build did not install a discoverable system-wide binary.
+
+- name: Ensure mavlink-router configuration directory exists
   ansible.builtin.file:
     path: /etc/mavlink-router
     state: directory
@@ -42,33 +140,33 @@
     group: root
     mode: "0755"
 
-- name: Configure mavlink-router
+- name: Install managed mavlink-router systemd service
+  ansible.builtin.template:
+    src: mavlink-router.service.j2
+    dest: /etc/systemd/system/mavlink-router.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart mavlink-router if enabled
+
+- name: Configure mavlink-router endpoints
   ansible.builtin.template:
     src: mavlink-router-main.conf.j2
     dest: /etc/mavlink-router/main.conf
     owner: root
     group: root
     mode: "0644"
-  notify: Restart mavlink-router
+  notify: Restart mavlink-router if enabled
 
-- name: Enable or disable mavlink-router service
+- name: Keep mavlink-router service in requested state
   ansible.builtin.systemd:
-    name: mavlink-router
+    name: mavlink-router.service
+    daemon_reload: true
     enabled: "{{ mavlink_router_enable_service | bool }}"
     state: "{{ 'started' if mavlink_router_enable_service | bool else 'stopped' }}"
-  failed_when: false
 
-- name: Show MAVLink tool versions
-  ansible.builtin.shell: |
-    set -e
-    echo "mavlink-routerd: $(command -v mavlink-routerd || true)"
-    echo "mavproxy.py: $(command -v mavproxy.py || true)"
-    if command -v mavproxy.py >/dev/null 2>&1; then
-      mavproxy.py --version || true
-    fi
-  register: mavlink_versions
-  changed_when: false
-
-- name: Print MAVLink tool versions
+- name: Report installed MAVLink commands
   ansible.builtin.debug:
-    var: mavlink_versions.stdout_lines
+    msg:
+      - "mavproxy.py: {{ mavproxy_binary.stdout | trim }}"
+      - "mavlink-routerd: {{ mavlink_router_binary.stdout | trim }}"

@@ -8,10 +8,13 @@ ssh_ports:
 lte_connection_name: team-lte
 lte_apn: internet
 lte_table: 100
-
-# This interface name is stable on the current Pi.
-# Change per-host in host_vars if another Pi gets a different name.
-lte_iface: wwp1s0u1u3i2
+lte_rule_priority: 100
+lte_route_metric: 700
+lte_ipv6_method: disabled
+modem_detect_retries: 12
+modem_detect_delay: 5
+lte_ip_wait_retries: 18
+lte_ip_wait_delay: 5
 
 # Keep Wi-Fi as the normal default route for management.
 # LTE policy routing handles replies from the LTE static IP.
@@ -30,6 +33,7 @@ packages_common:
   - network-manager
   - modemmanager
   - usb-modeswitch
+  - usbutils
   - libqmi-utils
   - udhcpc
   - python3
@@ -37,13 +41,25 @@ packages_common:
   - python3-venv
 
 mavlink_packages:
-  - mavlink-router
   - python3-pip
   - python3-venv
+  - git
+  - meson
+  - ninja-build
+  - pkg-config
+  - gcc
+  - g++
+  - libsystemd-dev
 
 mavlink_python_packages:
+  - future
   - MAVProxy
   - pymavlink
+
+mavlink_router_repo: https://github.com/mavlink-router/mavlink-router.git
+mavlink_router_version: master
+mavlink_router_src_dir: /opt/mavlink-router-src
+mavlink_router_build_dir: /opt/mavlink-router-src/build
 
 # MAVLink router service is installed/configured, but not enabled by default.
 # Enable after you connect Pixhawk or decide endpoints are final.

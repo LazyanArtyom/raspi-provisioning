@@ -1,0 +1,43 @@
+---
+- name: Collect Raspberry Pi swarm node diagnostics
+  hosts: raspis
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Run best-effort diagnostic commands
+      ansible.builtin.shell: "{{ item.command }}"
+      args:
+        executable: /bin/bash
+      loop:
+        - { name: hostnamectl, command: "hostnamectl" }
+        - { name: uname, command: "uname -a" }
+        - { name: ip_addr, command: "ip address" }
+        - { name: ip_route, command: "ip route" }
+        - { name: ip_rule, command: "ip rule" }
+        - { name: lte_route_table, command: "ip route show table {{ lte_table | default(100) }}" }
+        - { name: nmcli_device, command: "nmcli device status" }
+        - { name: nmcli_connections, command: "nmcli connection show" }
+        - { name: mmcli_list, command: "mmcli --list-modems" }
+        - { name: mmcli_modem_0, command: "mmcli --modem 0" }
+        - { name: lsusb, command: "lsusb" }
+        - { name: modem_device_nodes, command: "ls -l /dev/cdc-wdm* /dev/ttyUSB* 2>&1 || true" }
+        - { name: ip_link, command: "ip link" }
+        - { name: kernel_modem_messages, command: "dmesg | grep -Ei 'telit|qmi|cdc|wwan|ttyUSB|option' || true" }
+        - { name: modemmanager_journal, command: "journalctl -u ModemManager --no-pager -n 100" }
+        - { name: networkmanager_journal, command: "journalctl -u NetworkManager --no-pager -n 100" }
+        - { name: ssh_sockets, command: "ss -tlnp" }
+        - { name: mavproxy_path, command: "which mavproxy.py || true" }
+        - { name: mavlink_router_path, command: "which mavlink-routerd || true" }
+      register: diagnostics_results
+      changed_when: false
+      failed_when: false
+
+    - name: Print diagnostic command output
+      ansible.builtin.debug:
+        msg: |-
+          ===== {{ item.item.name }} (rc={{ item.rc }}) =====
+          {{ item.stdout | default('') }}
+          {% if item.stderr | default('') | length > 0 %}stderr: {{ item.stderr }}{% endif %}
+      loop: "{{ diagnostics_results.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"

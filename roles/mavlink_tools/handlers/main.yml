@@ -1,6 +1,7 @@
 ---
-- name: Restart mavlink-router
+- name: Restart mavlink-router if enabled
   ansible.builtin.systemd:
-    name: mavlink-router
+    name: mavlink-router.service
+    daemon_reload: true
     state: restarted
   when: mavlink_router_enable_service | bool

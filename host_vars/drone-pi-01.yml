@@ -1,22 +1,10 @@
 ---
 hostname: drone-pi-01
 
-# Current real Raspberry Pi.
-lte_iface: wwp1s0u1u3i2
+# The LTE interface is auto-detected. Set lte_iface_override only as a recovery override.
 lte_ip: 178.160.252.170
 lte_prefix: 30
 lte_gateway: 178.160.252.169
 lte_network: 178.160.252.168/30
 lte_table: 100
 lte_apn: internet
-
-# Optional: adapt for your Mac/QGC and local swarmkit agent port.
-mavlink_router_endpoints:
-  - name: qgc_mac
-    type: udp
-    address: 192.168.123.46
-    port: 14550
-  - name: swarmkit_agent_local
-    type: udp
-    address: 127.0.0.1
-    port: 14601

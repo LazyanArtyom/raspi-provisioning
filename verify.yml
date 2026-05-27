@@ -1,0 +1,250 @@
+---
+- name: Verify Raspberry Pi swarm node provisioning
+  hosts: raspis
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read configured hostname
+      ansible.builtin.command: hostname --short
+      register: verify_hostname
+      changed_when: false
+
+    - name: Verify configured hostname
+      ansible.builtin.assert:
+        that:
+          - (verify_hostname.stdout | trim) == hostname
+        fail_msg: "Expected hostname {{ hostname }}, found {{ verify_hostname.stdout | trim }}."
+
+    - name: Read SSH listening sockets
+      ansible.builtin.command: ss -H -tln
+      register: verify_ssh_sockets
+      changed_when: false
+
+    - name: Verify both SSH ports are listening
+      ansible.builtin.assert:
+        that:
+          - "':22 ' in verify_ssh_sockets.stdout"
+          - "':2222 ' in verify_ssh_sockets.stdout"
+        fail_msg: "SSH is not listening on both ports 22 and 2222: {{ verify_ssh_sockets.stdout }}"
+
+    - name: Check DNS resolution
+      ansible.builtin.command: getent ahostsv4 example.com
+      register: verify_dns
+      changed_when: false
+      failed_when: false
+
+    - name: Check general internet connectivity
+      ansible.builtin.command: curl -4 --fail --silent --show-error --max-time 20 https://api.ipify.org
+      register: verify_internet
+      changed_when: false
+      failed_when: false
+
+    - name: Verify DNS and internet access
+      ansible.builtin.assert:
+        that:
+          - verify_dns.rc == 0
+          - verify_internet.rc == 0
+        fail_msg: >-
+          General connectivity failed. DNS rc={{ verify_dns.rc }};
+          internet rc={{ verify_internet.rc }} stderr={{ verify_internet.stderr | default('') }}.
+
+    - name: List USB devices
+      ansible.builtin.command: lsusb
+      register: verify_lsusb
+      changed_when: false
+      failed_when: false
+
+    - name: Verify Telit USB device is attached
+      ansible.builtin.assert:
+        that:
+          - verify_lsusb.rc == 0
+          - verify_lsusb.stdout is search('1bc7|Telit')
+        fail_msg: "No Telit/1bc7 USB modem was found in lsusb output: {{ verify_lsusb.stdout }}"
+
+    - name: List ModemManager modems
+      ansible.builtin.command: mmcli --list-modems
+      register: verify_modem_list
+      changed_when: false
+      failed_when: false
+
+    - name: Verify that ModemManager exposes a modem
+      ansible.builtin.assert:
+        that:
+          - verify_modem_list.rc == 0
+          - verify_modem_list.stdout is search('/org/freedesktop/ModemManager1/Modem/')
+        fail_msg: "Telit modem is not visible in ModemManager: {{ verify_modem_list.stdout }}"
+
+    - name: Select modem identifier for verification
+      ansible.builtin.set_fact:
+        verify_modem_id: "{{ verify_modem_list.stdout | regex_findall('/Modem/([0-9]+)') | first }}"
+
+    - name: Read modem details for verification
+      ansible.builtin.command: "mmcli --modem {{ verify_modem_id }}"
+      register: verify_modem_details
+      changed_when: false
+
+    - name: Verify modem model and parse network port
+      ansible.builtin.assert:
+        that:
+          - verify_modem_details.stdout is search('Telit|LE910')
+        fail_msg: "ModemManager modem is not the expected Telit LE910: {{ verify_modem_details.stdout }}"
+
+    - name: Discover qmi_wwan interface as verification fallback
+      ansible.builtin.shell: |
+        for net_path in /sys/class/net/*; do
+            [ -e "$net_path/device/driver" ] || continue
+            if [ "$(basename "$(readlink -f "$net_path/device/driver")")" = "qmi_wwan" ]; then
+                basename "$net_path"
+                exit 0
+            fi
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      register: verify_sysfs_interface
+      changed_when: false
+
+    - name: Record configured verification interface override
+      ansible.builtin.set_fact:
+        verify_override_iface: "{{ lte_iface_override | default(lte_iface | default('', true), true) }}"
+        verify_modem_iface: >-
+          {{ (verify_modem_details.stdout |
+              regex_findall('([A-Za-z0-9_.:-]+)\s+\(net\)') | first) |
+              default('', true) }}
+
+    - name: Select LTE interface for verification
+      ansible.builtin.set_fact:
+        verify_lte_iface: >-
+          {{ verify_override_iface if verify_override_iface | length > 0 else
+             (verify_modem_iface if verify_modem_iface | length > 0 else
+             (verify_sysfs_interface.stdout | trim)) }}
+
+    - name: Check selected LTE verification interface
+      ansible.builtin.command: "ip link show dev {{ verify_lte_iface }}"
+      register: verify_lte_link
+      changed_when: false
+      failed_when: false
+      when: verify_lte_iface | length > 0
+
+    - name: Verify NetworkManager LTE profile is active
+      ansible.builtin.command: nmcli --get-values NAME connection show --active
+      register: verify_active_connections
+      changed_when: false
+
+    - name: Verify LTE profile activation
+      ansible.builtin.assert:
+        that:
+          - lte_connection_name in verify_active_connections.stdout_lines
+          - verify_lte_iface | length > 0
+          - verify_lte_link.rc | default(1) == 0
+        fail_msg: >-
+          LTE connection {{ lte_connection_name }} is not active or no LTE interface
+          was detected. Active profiles: {{ verify_active_connections.stdout_lines }}.
+
+    - name: Read LTE interface addresses
+      ansible.builtin.command: "ip -4 -o address show dev {{ verify_lte_iface }}"
+      register: verify_lte_address
+      changed_when: false
+      failed_when: false
+
+    - name: Verify assigned static LTE address
+      ansible.builtin.assert:
+        that:
+          - verify_lte_address.rc == 0
+          - lte_ip in verify_lte_address.stdout
+        fail_msg: "Expected LTE address {{ lte_ip }} on {{ verify_lte_iface }}: {{ verify_lte_address.stdout }}"
+
+    - name: Request public IP through LTE source address
+      ansible.builtin.command: >-
+        curl -4 --interface {{ lte_ip }} --fail --silent --show-error
+        --max-time 30 https://api.ipify.org
+      register: verify_lte_public_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Verify public egress address through LTE
+      ansible.builtin.assert:
+        that:
+          - verify_lte_public_ip.rc == 0
+          - (verify_lte_public_ip.stdout | trim) == lte_ip
+        fail_msg: >-
+          LTE-bound curl did not return {{ lte_ip }}. rc={{ verify_lte_public_ip.rc }},
+          output={{ verify_lte_public_ip.stdout | trim }},
+          stderr={{ verify_lte_public_ip.stderr | default('') }}.
+
+    - name: Read policy routing rules
+      ansible.builtin.command: ip -4 rule show
+      register: verify_rules
+      changed_when: false
+
+    - name: Verify source policy rule exists
+      ansible.builtin.assert:
+        that:
+          - >-
+            verify_rules.stdout is search(
+            '(?m)^' ~ (lte_rule_priority | string) ~ ':.*from ' ~ lte_ip ~
+            '(/32)? .*?(lookup|table) ' ~ (lte_table | string))
+        fail_msg: "Missing LTE source policy rule for {{ lte_ip }} table {{ lte_table }}: {{ verify_rules.stdout }}"
+
+    - name: Read LTE policy routing table
+      ansible.builtin.command: "ip -4 route show table {{ lte_table }}"
+      register: verify_lte_table
+      changed_when: false
+
+    - name: Verify LTE table routes
+      ansible.builtin.assert:
+        that:
+          - lte_gateway in verify_lte_table.stdout
+          - lte_network in verify_lte_table.stdout
+          - verify_lte_iface in verify_lte_table.stdout
+        fail_msg: "LTE table {{ lte_table }} is incomplete: {{ verify_lte_table.stdout }}"
+
+    - name: Read route decision from LTE source address
+      ansible.builtin.command: "ip -4 route get 1.1.1.1 from {{ lte_ip }}"
+      register: verify_route_decision
+      changed_when: false
+
+    - name: Verify LTE route decision
+      ansible.builtin.assert:
+        that:
+          - "('dev ' ~ verify_lte_iface) in verify_route_decision.stdout"
+          - "('table ' ~ (lte_table | string)) in verify_route_decision.stdout"
+        fail_msg: "Incorrect LTE route decision: {{ verify_route_decision.stdout }}"
+
+    - name: Locate installed MAVLink commands
+      ansible.builtin.command: "which {{ item }}"
+      loop:
+        - mavproxy.py
+        - mavlink-routerd
+      register: verify_mavlink_commands
+      changed_when: false
+      failed_when: false
+
+    - name: Verify MAVLink commands exist
+      ansible.builtin.assert:
+        that:
+          - verify_mavlink_commands.results[0].rc == 0
+          - verify_mavlink_commands.results[1].rc == 0
+        fail_msg: "MAVLink command is missing: {{ verify_mavlink_commands.results }}"
+
+    - name: Execute MAVProxy verification
+      ansible.builtin.command: mavproxy.py --version
+      register: verify_mavproxy_version
+      changed_when: false
+      failed_when: false
+
+    - name: Verify MAVProxy runs successfully
+      ansible.builtin.assert:
+        that:
+          - verify_mavproxy_version.rc == 0
+        fail_msg: "mavproxy.py exists but cannot execute: {{ verify_mavproxy_version.stderr | default('') }}"
+
+    - name: Report verification success
+      ansible.builtin.debug:
+        msg:
+          - "Hostname: {{ hostname }}"
+          - "LTE interface/address: {{ verify_lte_iface }} / {{ lte_ip }}"
+          - "LTE public IP check: {{ verify_lte_public_ip.stdout | trim }}"
+          - "Route decision: {{ verify_route_decision.stdout }}"
+          - "MAVProxy: {{ verify_mavlink_commands.results[0].stdout | trim }}"
+          - "mavlink-routerd: {{ verify_mavlink_commands.results[1].stdout | trim }}"
