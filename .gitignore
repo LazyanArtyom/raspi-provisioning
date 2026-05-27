@@ -1,0 +1,66 @@
+# Ansible runtime/cache files
+*.retry
+.ansible/
+ansible.log
+
+# Ansible Galaxy installed collections/roles if installed locally
+collections/
+roles/external/
+roles/galaxy/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux/editor temp files
+*~
+*.swp
+*.swo
+*.tmp
+*.bak
+*.orig
+
+# IDE/editor directories
+.vscode/
+.idea/
+
+# Secrets / local-only config
+.env
+.env.*
+*.pem
+*.key
+*.pub
+id_rsa*
+id_ed25519*
+known_hosts
+
+# Local inventory overrides
+inventory.local.ini
+inventory.private.ini
+host_vars/*.local.yml
+group_vars/*.local.yml
+
+# Generated archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Logs
+*.log
+logs/
