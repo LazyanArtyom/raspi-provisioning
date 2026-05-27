@@ -1,0 +1,7 @@
+---
+- name: Configure Raspberry Pi swarm node
+  hosts: raspis
+  become: true
+  roles:
+    - raspi_base
+    - mavlink_tools

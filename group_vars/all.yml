@@ -1,0 +1,66 @@
+---
+# Common settings for all Raspberry Pis.
+
+ssh_ports:
+  - 22
+  - 2222
+
+lte_connection_name: team-lte
+lte_apn: internet
+lte_table: 100
+
+# This interface name is stable on the current Pi.
+# Change per-host in host_vars if another Pi gets a different name.
+lte_iface: wwp1s0u1u3i2
+
+# Keep Wi-Fi as the normal default route for management.
+# LTE policy routing handles replies from the LTE static IP.
+wifi_iface: wlan0
+
+packages_common:
+  - curl
+  - git
+  - vim
+  - nano
+  - htop
+  - tcpdump
+  - net-tools
+  - iproute2
+  - openssh-server
+  - network-manager
+  - modemmanager
+  - usb-modeswitch
+  - libqmi-utils
+  - udhcpc
+  - python3
+  - python3-pip
+  - python3-venv
+
+mavlink_packages:
+  - mavlink-router
+  - python3-pip
+  - python3-venv
+
+mavlink_python_packages:
+  - MAVProxy
+  - pymavlink
+
+# MAVLink router service is installed/configured, but not enabled by default.
+# Enable after you connect Pixhawk or decide endpoints are final.
+mavlink_router_enable_service: false
+
+mavlink_router_uart_device: /dev/ttyACM0
+mavlink_router_uart_baud: 115200
+
+mavlink_router_report_stats: true
+
+# Default endpoints; override per host.
+mavlink_router_endpoints:
+  - name: qgc
+    type: udp
+    address: 192.168.123.46
+    port: 14550
+  - name: swarmkit_agent
+    type: udp
+    address: 127.0.0.1
+    port: 14601

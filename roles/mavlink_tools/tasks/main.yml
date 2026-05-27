@@ -1,0 +1,74 @@
+---
+- name: Install MAVLink-related apt packages
+  ansible.builtin.apt:
+    name: "{{ mavlink_packages }}"
+    state: present
+    update_cache: true
+
+- name: Install MAVLink Python packages globally
+  ansible.builtin.pip:
+    name: "{{ mavlink_python_packages }}"
+    executable: pip3
+    extra_args: --break-system-packages
+  register: pip_mavlink
+  failed_when: false
+
+- name: Install MAVLink Python packages in virtual environment if global install failed
+  when: pip_mavlink is failed
+  block:
+    - name: Create MAVLink tools venv
+      ansible.builtin.command: python3 -m venv /opt/mavlink-tools-venv
+      args:
+        creates: /opt/mavlink-tools-venv/bin/python
+
+    - name: Install MAVLink Python packages into venv
+      ansible.builtin.pip:
+        name: "{{ mavlink_python_packages }}"
+        virtualenv: /opt/mavlink-tools-venv
+        virtualenv_command: python3 -m venv
+
+    - name: Symlink mavproxy.py
+      ansible.builtin.file:
+        src: /opt/mavlink-tools-venv/bin/mavproxy.py
+        dest: /usr/local/bin/mavproxy.py
+        state: link
+        force: true
+
+- name: Ensure mavlink-router config directory exists
+  ansible.builtin.file:
+    path: /etc/mavlink-router
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Configure mavlink-router
+  ansible.builtin.template:
+    src: mavlink-router-main.conf.j2
+    dest: /etc/mavlink-router/main.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart mavlink-router
+
+- name: Enable or disable mavlink-router service
+  ansible.builtin.systemd:
+    name: mavlink-router
+    enabled: "{{ mavlink_router_enable_service | bool }}"
+    state: "{{ 'started' if mavlink_router_enable_service | bool else 'stopped' }}"
+  failed_when: false
+
+- name: Show MAVLink tool versions
+  ansible.builtin.shell: |
+    set -e
+    echo "mavlink-routerd: $(command -v mavlink-routerd || true)"
+    echo "mavproxy.py: $(command -v mavproxy.py || true)"
+    if command -v mavproxy.py >/dev/null 2>&1; then
+      mavproxy.py --version || true
+    fi
+  register: mavlink_versions
+  changed_when: false
+
+- name: Print MAVLink tool versions
+  ansible.builtin.debug:
+    var: mavlink_versions.stdout_lines

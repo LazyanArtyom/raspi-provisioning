@@ -1,0 +1,21 @@
+---
+hostname: drone-pi-02
+
+# Fill these values for the second Pi.
+lte_iface: wwp1s0u1u3i2
+lte_ip: 178.160.252.X
+lte_prefix: 30
+lte_gateway: 178.160.252.Y
+lte_network: 178.160.252.Z/30
+lte_table: 100
+lte_apn: internet
+
+mavlink_router_endpoints:
+  - name: qgc_mac
+    type: udp
+    address: 192.168.123.46
+    port: 14550
+  - name: swarmkit_agent_local
+    type: udp
+    address: 127.0.0.1
+    port: 14602

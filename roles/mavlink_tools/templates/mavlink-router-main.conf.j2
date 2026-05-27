@@ -1,0 +1,17 @@
+[General]
+ReportStats={{ "true" if mavlink_router_report_stats else "false" }}
+MavlinkDialect=auto
+
+[UartEndpoint pixhawk]
+Device={{ mavlink_router_uart_device }}
+Baud={{ mavlink_router_uart_baud }}
+
+{% for endpoint in mavlink_router_endpoints %}
+{% if endpoint.type == "udp" %}
+[UdpEndpoint {{ endpoint.name }}]
+Mode=Normal
+Address={{ endpoint.address }}
+Port={{ endpoint.port }}
+
+{% endif %}
+{% endfor %}

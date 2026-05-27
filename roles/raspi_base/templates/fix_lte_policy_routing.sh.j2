@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+IFACE="{{ lte_iface }}"
+LTE_IP="{{ lte_ip }}"
+LTE_NET="{{ lte_network }}"
+LTE_GW="{{ lte_gateway }}"
+TABLE="{{ lte_table }}"
+WIFI_IFACE="{{ wifi_iface }}"
+
+# Wait until LTE interface exists and has the static IP.
+for i in $(seq 1 90); do
+    if ip -4 addr show dev "$IFACE" 2>/dev/null | grep -q "$LTE_IP"; then
+        break
+    fi
+    sleep 1
+done
+
+# If LTE IP still does not exist, do not break boot.
+if ! ip -4 addr show dev "$IFACE" 2>/dev/null | grep -q "$LTE_IP"; then
+    echo "LTE IP $LTE_IP not present on $IFACE; skipping policy routing"
+    exit 0
+fi
+
+sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null
+sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null
+sysctl -w net.ipv4.conf."$IFACE".rp_filter=0 >/dev/null
+sysctl -w net.ipv4.conf."$WIFI_IFACE".rp_filter=0 >/dev/null 2>&1 || true
+
+ip route flush table "$TABLE" 2>/dev/null || true
+ip route add "$LTE_NET" dev "$IFACE" src "$LTE_IP" table "$TABLE" 2>/dev/null || true
+ip route add default via "$LTE_GW" dev "$IFACE" table "$TABLE" 2>/dev/null || true
+
+# Remove duplicate rules for this source/table/priority, then add one clean rule.
+while ip rule show | grep -q "from $LTE_IP lookup $TABLE"; do
+    ip rule delete from "$LTE_IP/32" table "$TABLE" priority 100 2>/dev/null || break
+done
+
+ip rule add from "$LTE_IP/32" table "$TABLE" priority 100 2>/dev/null || true
+
+ip route get 1.1.1.1 from "$LTE_IP" || true
+
+exit 0

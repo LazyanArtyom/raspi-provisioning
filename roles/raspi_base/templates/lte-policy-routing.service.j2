@@ -1,0 +1,12 @@
+[Unit]
+Description=Fix LTE source-based policy routing for static public IP
+After=NetworkManager.service ModemManager.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fix-lte-policy-routing.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
