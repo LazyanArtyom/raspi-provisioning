@@ -21,6 +21,7 @@
         - { name: mmcli_modem_0, command: "mmcli --modem 0" }
         - { name: lsusb, command: "lsusb" }
         - { name: modem_device_nodes, command: "ls -l /dev/cdc-wdm* /dev/ttyUSB* 2>&1 || true" }
+        - { name: modem_udev_properties, command: "udevadm info --query=property --name=/dev/cdc-wdm0 2>&1 || true" }
         - { name: ip_link, command: "ip link" }
         - { name: kernel_modem_messages, command: "dmesg | grep -Ei 'telit|qmi|cdc|wwan|ttyUSB|option' || true" }
         - { name: modemmanager_journal, command: "journalctl -u ModemManager --no-pager -n 100" }

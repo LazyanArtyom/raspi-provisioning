@@ -78,12 +78,57 @@
 - name: Build mavlink-router from source if it is unavailable from apt
   when: mavlink_router_after_apt.rc != 0
   block:
+    - name: Check whether Meson can resolve the systemd installation metadata
+      ansible.builtin.command: pkg-config --exists systemd
+      register: mavlink_router_systemd_pc_initial
+      changed_when: false
+      failed_when: false
+
+    - name: Install split systemd pkg-config metadata package when required
+      ansible.builtin.apt:
+        name: "{{ mavlink_router_systemd_metadata_package }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      register: mavlink_router_systemd_metadata_install
+      failed_when: false
+      when: mavlink_router_systemd_pc_initial.rc != 0
+
+    - name: Verify systemd pkg-config metadata required by mavlink-router
+      ansible.builtin.command: pkg-config --modversion systemd
+      register: mavlink_router_systemd_pc
+      changed_when: false
+      failed_when: false
+
+    - name: Require systemd metadata before building mavlink-router
+      ansible.builtin.assert:
+        that:
+          - mavlink_router_systemd_pc.rc == 0
+        fail_msg: >-
+          mavlink-router requires pkg-config metadata named systemd, but it is
+          unavailable after attempting to install
+          {{ mavlink_router_systemd_metadata_package }}. On Debian 13 /
+          current Raspberry Pi OS this metadata is supplied by systemd-dev,
+          not libsystemd-dev. Apt output:
+          {{ mavlink_router_systemd_metadata_install.msg | default('package install not attempted') }}
+
     - name: Checkout mavlink-router source
       ansible.builtin.git:
         repo: "{{ mavlink_router_repo }}"
         dest: "{{ mavlink_router_src_dir }}"
         version: "{{ mavlink_router_version }}"
         update: true
+
+    - name: Inspect mavlink-router Meson build configuration
+      ansible.builtin.stat:
+        path: "{{ mavlink_router_build_dir }}/build.ninja"
+      register: mavlink_router_build_ninja
+
+    - name: Remove incomplete mavlink-router Meson build directory
+      ansible.builtin.file:
+        path: "{{ mavlink_router_build_dir }}"
+        state: absent
+      when: not mavlink_router_build_ninja.stat.exists
 
     - name: Configure mavlink-router Meson build
       ansible.builtin.command:

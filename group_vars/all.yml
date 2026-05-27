@@ -11,8 +11,13 @@ lte_table: 100
 lte_rule_priority: 100
 lte_route_metric: 700
 lte_ipv6_method: disabled
+telit_usb_vendor_id: "1bc7"
+telit_usb_product_id: "1201"
+modem_initial_detect_retries: 3
+modem_rescan_retries: 3
 modem_detect_retries: 12
 modem_detect_delay: 5
+modem_usb_reprobe_delay: 2
 lte_ip_wait_retries: 18
 lte_ip_wait_delay: 5
 
@@ -56,12 +61,19 @@ mavlink_python_packages:
 
 # A drone Pi is provisioned as a dedicated appliance. Python command-line tools
 # are installed system-wide under /usr/local instead of in per-tool venvs.
-python_global_pip_extra_args: --break-system-packages
+python_global_pip_extra_args: >-
+  --break-system-packages
+  --timeout 120
+  --retries 10
+  --resume-retries 10
 
 mavlink_router_repo: https://github.com/mavlink-router/mavlink-router.git
 mavlink_router_version: master
 mavlink_router_src_dir: /opt/mavlink-router-src
 mavlink_router_build_dir: /opt/mavlink-router-src/build
+# Debian 13 split systemd.pc from libsystemd-dev into this package. Install it
+# only when pkg-config cannot already resolve the required systemd metadata.
+mavlink_router_systemd_metadata_package: systemd-dev
 
 # MAVLink router service is installed/configured, but not enabled by default.
 # Enable after you connect Pixhawk or decide endpoints are final.

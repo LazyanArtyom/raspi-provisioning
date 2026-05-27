@@ -67,20 +67,37 @@
 - name: Apply validated SSH configuration without dropping sessions
   ansible.builtin.meta: flush_handlers
 
-- name: Wait briefly for Telit modem discovery in ModemManager
-  ansible.builtin.command: mmcli --list-modems
+- name: Wait briefly for Telit modem discovery before recovery
+  ansible.builtin.shell: |
+    output=""
+    for attempt in $(seq 1 "{{ modem_initial_detect_retries }}"); do
+        output="$(mmcli --list-modems 2>&1 || true)"
+        if printf '%s\n' "$output" | grep -Fq '/org/freedesktop/ModemManager1/Modem/'; then
+            printf '%s\n' "$output"
+            exit 0
+        fi
+        sleep "{{ modem_detect_delay }}"
+    done
+    printf '%s\n' "$output"
+  args:
+    executable: /bin/bash
   register: modem_list_initial
   changed_when: false
-  failed_when: false
-  ignore_errors: true
-  until: "'/org/freedesktop/ModemManager1/Modem/' in (modem_list_initial.stdout | default(''))"
-  retries: 3
-  delay: "{{ modem_detect_delay }}"
 
 - name: Recover ModemManager discovery without changing NetworkManager
   when: "'/org/freedesktop/ModemManager1/Modem/' not in (modem_list_initial.stdout | default(''))"
   block:
-    - name: Trigger device events for already enumerated modem hardware
+    - name: Restart ModemManager so it is listening before modem events are replayed
+      ansible.builtin.systemd:
+        name: ModemManager
+        state: restarted
+
+    - name: Ask ModemManager to rescan available modem devices
+      ansible.builtin.command: mmcli --scan-modems
+      changed_when: false
+      failed_when: false
+
+    - name: Replay existing USB device events while ModemManager is running
       ansible.builtin.command: udevadm trigger --subsystem-match=usb --action=add
       changed_when: true
 
@@ -88,20 +105,73 @@
       ansible.builtin.command: udevadm settle
       changed_when: false
 
-    - name: Restart ModemManager after unsuccessful initial discovery
-      ansible.builtin.systemd:
-        name: ModemManager
-        state: restarted
+    - name: Wait briefly after ModemManager rescan and udev replay
+      ansible.builtin.shell: |
+        output=""
+        for attempt in $(seq 1 "{{ modem_rescan_retries }}"); do
+            output="$(mmcli --list-modems 2>&1 || true)"
+            if printf '%s\n' "$output" | grep -Fq '/org/freedesktop/ModemManager1/Modem/'; then
+                printf '%s\n' "$output"
+                exit 0
+            fi
+            sleep "{{ modem_detect_delay }}"
+        done
+        printf '%s\n' "$output"
+      args:
+        executable: /bin/bash
+      register: modem_list_after_rescan
+      changed_when: false
 
-- name: Wait for modem to appear after safe recovery attempt
-  ansible.builtin.command: mmcli --list-modems
+- name: Physically reprobe Telit USB modem when ModemManager remains blind
+  ansible.builtin.shell: |
+    set -eu
+    usb_device=""
+    for candidate in /sys/bus/usb/devices/*; do
+        [ -r "$candidate/idVendor" ] || continue
+        [ -r "$candidate/idProduct" ] || continue
+        [ "$(cat "$candidate/idVendor")" = "{{ telit_usb_vendor_id }}" ] || continue
+        [ "$(cat "$candidate/idProduct")" = "{{ telit_usb_product_id }}" ] || continue
+        [ -e "$candidate/driver" ] || continue
+        [ "$(basename "$(readlink -f "$candidate/driver")")" = "usb" ] || continue
+        usb_device="$(basename "$candidate")"
+        break
+    done
+
+    if [ -z "$usb_device" ]; then
+        echo "Telit USB parent {{ telit_usb_vendor_id }}:{{ telit_usb_product_id }} was not found for rebind" >&2
+        exit 1
+    fi
+
+    echo "Reprobing Telit USB device $usb_device for ModemManager discovery"
+    printf '%s' "$usb_device" > /sys/bus/usb/drivers/usb/unbind
+    sleep "{{ modem_usb_reprobe_delay }}"
+    printf '%s' "$usb_device" > /sys/bus/usb/drivers/usb/bind
+    udevadm settle
+  args:
+    executable: /bin/bash
+  register: telit_usb_reprobe
+  changed_when: telit_usb_reprobe.rc == 0
+  failed_when: false
+  when:
+    - "'/org/freedesktop/ModemManager1/Modem/' not in (modem_list_initial.stdout | default(''))"
+    - "'/org/freedesktop/ModemManager1/Modem/' not in (modem_list_after_rescan.stdout | default(''))"
+
+- name: Wait for modem to appear after discovery and recovery attempts
+  ansible.builtin.shell: |
+    output=""
+    for attempt in $(seq 1 "{{ modem_detect_retries }}"); do
+        output="$(mmcli --list-modems 2>&1 || true)"
+        if printf '%s\n' "$output" | grep -Fq '/org/freedesktop/ModemManager1/Modem/'; then
+            printf '%s\n' "$output"
+            exit 0
+        fi
+        sleep "{{ modem_detect_delay }}"
+    done
+    printf '%s\n' "$output"
+  args:
+    executable: /bin/bash
   register: modem_list
   changed_when: false
-  failed_when: false
-  ignore_errors: true
-  until: "'/org/freedesktop/ModemManager1/Modem/' in (modem_list.stdout | default(''))"
-  retries: "{{ modem_detect_retries }}"
-  delay: "{{ modem_detect_delay }}"
 
 - name: Collect modem discovery failure diagnostics
   ansible.builtin.shell: |
@@ -112,6 +182,8 @@
     ip link
     printf '%s\n' '===== modem device nodes ====='
     ls -l /dev/cdc-wdm* /dev/ttyUSB*
+    printf '%s\n' '===== udev modem properties ====='
+    udevadm info --query=property --name=/dev/cdc-wdm0 2>&1
     printf '%s\n' '===== kernel modem messages ====='
     dmesg | grep -Ei 'telit|qmi|wwan|cdc|ttyUSB|option'
     printf '%s\n' '===== ModemManager / NetworkManager journal ====='
@@ -133,9 +205,10 @@
     that:
       - "'/org/freedesktop/ModemManager1/Modem/' in (modem_list.stdout | default(''))"
     fail_msg: >-
-      ModemManager could not discover the Telit modem after a udev trigger and a
-      safe ModemManager restart. See the diagnostics printed above; NetworkManager
-      was deliberately left running to preserve Wi-Fi SSH.
+      ModemManager could not discover the Telit modem after a safe ModemManager
+      restart, udev rescan, and targeted Telit USB rebind where required.
+      See the diagnostics printed above; NetworkManager was deliberately left
+      running to preserve Wi-Fi SSH.
 
 - name: Select discovered modem identifier
   ansible.builtin.set_fact:

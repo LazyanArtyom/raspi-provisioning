@@ -14,7 +14,8 @@ Ninja, and the C++ compiler toolchain.
 
 NetworkManager is never stopped or restarted by this project during provisioning,
 so the Wi-Fi SSH management path remains available. If modem discovery is slow,
-only ModemManager may be restarted after a bounded retry period.
+ModemManager is restarted and the exact Telit USB device may be safely reprobed
+after bounded retries. The Wi-Fi interface is not reset.
 
 ## 1. Flash A Raspberry Pi
 
@@ -143,7 +144,8 @@ ansible-playbook playbook.yml --ask-pass --ask-become-pass
 The playbook performs the following checks rather than silently continuing:
 
 - ModemManager must discover a Telit modem after retries and, if necessary, a
-  safe ModemManager-only restart.
+  safe ModemManager restart followed by a targeted Telit USB reprobe. Fresh
+  images can expose `wwan0` before ModemManager has processed the modem.
 - `team-lte` must become active and receive the expected operator-assigned IP.
 - Traffic sourced from the LTE IP must route through policy table `100` and the
   detected LTE interface.
@@ -155,7 +157,10 @@ This project deliberately installs the Python command-line applications
 `MAVProxy`, `pymavlink`, `future`, Conan, and modern CMake globally with
 Debian's `--break-system-packages` opt-in. A dedicated freshly flashed node
 does not need per-tool virtual environments; Ansible owns these global tool
-installations.
+installations. Pip downloads use retry and resume settings because MAVProxy
+packages can be large on Raspberry Pi package mirrors. For source builds of
+`mavlink-router` on current Raspberry Pi OS / Debian 13, the role installs
+`systemd-dev` because that release split `systemd.pc` out of `libsystemd-dev`.
 
 If modem or LTE activation fails, the failed run prints kernel, USB,
 NetworkManager, and ModemManager evidence. More can be collected at any time:
