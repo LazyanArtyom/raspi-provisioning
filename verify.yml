@@ -239,6 +239,53 @@
           - verify_mavproxy_version.rc == 0
         fail_msg: "mavproxy.py exists but cannot execute: {{ verify_mavproxy_version.stderr | default('') }}"
 
+    - name: Read SwarmKit build tool versions
+      ansible.builtin.command: "{{ item.command }}"
+      loop:
+        - { name: git, command: "git --version" }
+        - { name: cmake, command: "cmake --version" }
+        - { name: conan, command: "conan --version" }
+        - { name: ninja, command: "ninja --version" }
+        - { name: gxx, command: "g++ -dumpfullversion -dumpversion" }
+      register: verify_swarmkit_tool_versions
+      changed_when: false
+      failed_when: false
+
+    - name: Inspect SwarmKit workspace and Conan profile
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ swarmkit_workspace_root }}"
+        - "{{ swarmkit_build_home }}/.conan2/profiles/default"
+      register: verify_swarmkit_paths
+
+    - name: Parse available SwarmKit toolchain versions
+      ansible.builtin.set_fact:
+        verify_swarmkit_cmake_version: >-
+          {{ (verify_swarmkit_tool_versions.results[1].stdout | default('') |
+              regex_search('[0-9]+\.[0-9]+\.[0-9]+')) | default('0.0.0', true) }}
+        verify_swarmkit_conan_version: >-
+          {{ (verify_swarmkit_tool_versions.results[2].stdout | default('') |
+              regex_search('[0-9]+\.[0-9]+\.[0-9]+')) | default('0.0.0', true) }}
+        verify_swarmkit_gxx_version: "{{ verify_swarmkit_tool_versions.results[4].stdout | default('0') | trim }}"
+
+    - name: Verify SwarmKit build environment is ready
+      ansible.builtin.assert:
+        that:
+          - verify_swarmkit_tool_versions.results | selectattr('rc', 'equalto', 0) | list | length == 5
+          - verify_swarmkit_cmake_version is version(swarmkit_min_cmake_version, '>=')
+          - verify_swarmkit_cmake_version is version(swarmkit_max_cmake_version, '<')
+          - verify_swarmkit_conan_version is version('2.0.0', '>=')
+          - (verify_swarmkit_gxx_version.split('.')[0] | int) >= (swarmkit_min_gcc_major | int)
+          - verify_swarmkit_paths.results[0].stat.isdir | default(false)
+          - verify_swarmkit_paths.results[1].stat.exists | default(false)
+        fail_msg: >-
+          SwarmKit build prerequisites are not ready. Expected CMake >=
+          {{ swarmkit_min_cmake_version }} and < {{ swarmkit_max_cmake_version }},
+          Conan 2, G++ >= {{ swarmkit_min_gcc_major }}, workspace
+          {{ swarmkit_workspace_root }}, and a Conan default profile. Tool
+          results: {{ verify_swarmkit_tool_versions.results }}.
+
     - name: Report verification success
       ansible.builtin.debug:
         msg:
@@ -248,3 +295,5 @@
           - "Route decision: {{ verify_route_decision.stdout }}"
           - "MAVProxy: {{ verify_mavlink_commands.results[0].stdout | trim }}"
           - "mavlink-routerd: {{ verify_mavlink_commands.results[1].stdout | trim }}"
+          - "SwarmKit workspace: {{ swarmkit_workspace_root }}"
+          - "Build tools: {{ verify_swarmkit_tool_versions.results[1].stdout_lines[0] }}, {{ verify_swarmkit_tool_versions.results[2].stdout | trim }}, G++ {{ verify_swarmkit_tool_versions.results[4].stdout | trim }}"

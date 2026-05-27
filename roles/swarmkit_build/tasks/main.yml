@@ -1,0 +1,113 @@
+---
+- name: Look up SwarmKit build user
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ swarmkit_build_user }}"
+  register: swarmkit_build_user_entry
+
+- name: Require an existing non-root SwarmKit build user
+  ansible.builtin.assert:
+    that:
+      - swarmkit_build_user != 'root'
+      - swarmkit_build_user in ansible_facts.getent_passwd
+    fail_msg: "SwarmKit builds require an existing non-root account; configured user is {{ swarmkit_build_user }}."
+
+- name: Install SwarmKit native build prerequisites
+  ansible.builtin.apt:
+    name: "{{ swarmkit_build_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install Conan and modern CMake globally for the dedicated node image
+  ansible.builtin.pip:
+    name: "{{ swarmkit_python_build_tools }}"
+    executable: pip3
+    extra_args: "{{ python_global_pip_extra_args }}"
+
+- name: Read SwarmKit toolchain command versions
+  ansible.builtin.command: "{{ item.command }}"
+  loop:
+    - { name: git, command: "git --version" }
+    - { name: cmake, command: "cmake --version" }
+    - { name: conan, command: "conan --version" }
+    - { name: ninja, command: "ninja --version" }
+    - { name: gxx, command: "g++ -dumpfullversion -dumpversion" }
+  register: swarmkit_build_tool_versions
+  changed_when: false
+
+- name: Record SwarmKit toolchain versions
+  ansible.builtin.set_fact:
+    swarmkit_git_version: "{{ swarmkit_build_tool_versions.results[0].stdout | trim }}"
+    swarmkit_cmake_version: "{{ swarmkit_build_tool_versions.results[1].stdout | regex_search('[0-9]+\\.[0-9]+\\.[0-9]+') }}"
+    swarmkit_conan_version: "{{ swarmkit_build_tool_versions.results[2].stdout | regex_search('[0-9]+\\.[0-9]+\\.[0-9]+') }}"
+    swarmkit_ninja_version: "{{ swarmkit_build_tool_versions.results[3].stdout | trim }}"
+    swarmkit_gxx_version: "{{ swarmkit_build_tool_versions.results[4].stdout | trim }}"
+
+- name: Verify toolchain satisfies SwarmKit CMake and Conan requirements
+  ansible.builtin.assert:
+    that:
+      - swarmkit_cmake_version is version(swarmkit_min_cmake_version, '>=')
+      - swarmkit_cmake_version is version(swarmkit_max_cmake_version, '<')
+      - swarmkit_conan_version is version('2.0.0', '>=')
+      - (swarmkit_gxx_version.split('.')[0] | int) >= (swarmkit_min_gcc_major | int)
+    fail_msg: >-
+      SwarmKit provisioning uses CMake >= {{ swarmkit_min_cmake_version }} and
+      < {{ swarmkit_max_cmake_version }}, Conan 2, and GCC/G++ >=
+      {{ swarmkit_min_gcc_major }} for its C++23 build. Found CMake
+      {{ swarmkit_cmake_version }}, Conan {{ swarmkit_conan_version }}, and G++
+      {{ swarmkit_gxx_version }}. Use a current Raspberry Pi OS Lite release
+      with a sufficiently recent compiler or configure a newer compiler.
+
+- name: Create SwarmKit workspace owned by build user
+  ansible.builtin.file:
+    path: "{{ swarmkit_workspace_root }}"
+    state: directory
+    owner: "{{ swarmkit_build_user }}"
+    group: "{{ swarmkit_build_group }}"
+    mode: "0755"
+
+- name: Install build instructions in SwarmKit workspace
+  ansible.builtin.template:
+    src: README.build.txt.j2
+    dest: "{{ swarmkit_workspace_root }}/README.build.txt"
+    owner: "{{ swarmkit_build_user }}"
+    group: "{{ swarmkit_build_group }}"
+    mode: "0644"
+
+- name: Initialize Conan default profile for build user
+  become: true
+  become_user: "{{ swarmkit_build_user }}"
+  ansible.builtin.command:
+    argv:
+      - conan
+      - profile
+      - detect
+      - --force
+  environment:
+    HOME: "{{ swarmkit_build_home }}"
+    PATH: "/usr/local/bin:/usr/bin:/bin"
+  register: swarmkit_conan_profile
+  changed_when: false
+
+- name: Optionally checkout SwarmKit source tree
+  become: true
+  become_user: "{{ swarmkit_build_user }}"
+  ansible.builtin.git:
+    repo: "{{ swarmkit_repo_url }}"
+    dest: "{{ swarmkit_source_dir }}"
+    version: "{{ swarmkit_repo_version }}"
+    update: "{{ swarmkit_repo_update | bool }}"
+  environment:
+    HOME: "{{ swarmkit_build_home }}"
+  when: swarmkit_repo_url | length > 0
+
+- name: Report SwarmKit build workspace readiness
+  ansible.builtin.debug:
+    msg:
+      - "Workspace: {{ swarmkit_workspace_root }}"
+      - "{{ swarmkit_git_version }}, CMake {{ swarmkit_cmake_version }}, Conan {{ swarmkit_conan_version }}, Ninja {{ swarmkit_ninja_version }}, G++ {{ swarmkit_gxx_version }}"
+      - >-
+        {{ 'Repository checked out at ' ~ swarmkit_source_dir
+           if swarmkit_repo_url | length > 0 else
+           'Repository URL not configured; clone SwarmKit into ' ~ swarmkit_source_dir ~ ' as ' ~ swarmkit_build_user ~ '.' }}

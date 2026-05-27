@@ -28,6 +28,13 @@
         - { name: ssh_sockets, command: "ss -tlnp" }
         - { name: mavproxy_path, command: "which mavproxy.py || true" }
         - { name: mavlink_router_path, command: "which mavlink-routerd || true" }
+        - { name: git_version, command: "git --version || true" }
+        - { name: cmake_version, command: "cmake --version || true" }
+        - { name: conan_version, command: "conan --version || true" }
+        - { name: ninja_version, command: "ninja --version || true" }
+        - { name: gxx_version, command: "g++ --version || true" }
+        - { name: swarmkit_workspace, command: "ls -la {{ swarmkit_workspace_root | default('/home/admin/workspace') }} || true" }
+        - { name: conan_profiles, command: "HOME={{ swarmkit_build_home | default('/home/admin') }} conan profile list || true" }
       register: diagnostics_results
       changed_when: false
       failed_when: false

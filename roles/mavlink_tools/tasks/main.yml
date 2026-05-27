@@ -6,40 +6,25 @@
     update_cache: true
     cache_valid_time: 3600
 
-- name: Attempt safe global install of MAVLink Python tools
+- name: Inspect legacy Ansible-managed MAVProxy venv shim
+  ansible.builtin.stat:
+    path: /usr/local/bin/mavproxy.py
+    follow: false
+  register: legacy_mavproxy_shim
+
+- name: Remove legacy MAVProxy venv shim before global installation
+  ansible.builtin.file:
+    path: /usr/local/bin/mavproxy.py
+    state: absent
+  when:
+    - legacy_mavproxy_shim.stat.islnk | default(false)
+    - legacy_mavproxy_shim.stat.lnk_source | default('') == '/opt/mavlink-tools-venv/bin/mavproxy.py'
+
+- name: Install MAVLink Python tools globally for the dedicated node image
   ansible.builtin.pip:
     name: "{{ mavlink_python_packages }}"
     executable: pip3
-    extra_args: --break-system-packages
-  register: mavlink_python_global
-  failed_when: false
-
-- name: Probe globally installed MAVProxy command
-  ansible.builtin.command: mavproxy.py --version
-  register: mavproxy_global_probe
-  changed_when: false
-  failed_when: false
-
-- name: Install MAVLink Python tools in an isolated venv when global tools are unusable
-  when: mavproxy_global_probe.rc != 0
-  block:
-    - name: Create MAVLink tools virtual environment
-      ansible.builtin.command: python3 -m venv /opt/mavlink-tools-venv
-      args:
-        creates: /opt/mavlink-tools-venv/bin/python
-
-    - name: Install MAVLink Python packages into virtual environment
-      ansible.builtin.pip:
-        name: "{{ mavlink_python_packages }}"
-        virtualenv: /opt/mavlink-tools-venv
-        virtualenv_command: python3 -m venv
-
-    - name: Expose venv MAVProxy command system-wide
-      ansible.builtin.file:
-        src: /opt/mavlink-tools-venv/bin/mavproxy.py
-        dest: /usr/local/bin/mavproxy.py
-        state: link
-        force: true
+    extra_args: "{{ python_global_pip_extra_args }}"
 
 - name: Locate MAVProxy command
   ansible.builtin.command: which mavproxy.py
@@ -62,6 +47,11 @@
     fail_msg: >-
       MAVProxy is missing or cannot start after installing future, MAVProxy, and
       pymavlink. Command output: {{ mavproxy_version.stderr | default('not found') }}
+
+- name: Remove obsolete Ansible-managed MAVLink virtual environment
+  ansible.builtin.file:
+    path: /opt/mavlink-tools-venv
+    state: absent
 
 - name: Check whether mavlink-routerd is already installed
   ansible.builtin.command: which mavlink-routerd

@@ -38,11 +38,9 @@ packages_common:
   - udhcpc
   - python3
   - python3-pip
-  - python3-venv
 
 mavlink_packages:
   - python3-pip
-  - python3-venv
   - git
   - meson
   - ninja-build
@@ -55,6 +53,10 @@ mavlink_python_packages:
   - future
   - MAVProxy
   - pymavlink
+
+# A drone Pi is provisioned as a dedicated appliance. Python command-line tools
+# are installed system-wide under /usr/local instead of in per-tool venvs.
+python_global_pip_extra_args: --break-system-packages
 
 mavlink_router_repo: https://github.com/mavlink-router/mavlink-router.git
 mavlink_router_version: master
@@ -80,3 +82,46 @@ mavlink_router_endpoints:
     type: udp
     address: 127.0.0.1
     port: 14601
+
+# SwarmKit development/build workspace.
+swarmkit_build_user: admin
+swarmkit_build_group: "{{ swarmkit_build_user }}"
+swarmkit_build_home: "/home/{{ swarmkit_build_user }}"
+swarmkit_workspace_root: "{{ swarmkit_build_home }}/workspace"
+swarmkit_source_dir: "{{ swarmkit_workspace_root }}/swarmkit"
+
+# Set this per inventory/group vault when Ansible should clone the repository.
+# Leave empty to clone the private/proprietary repository manually after provisioning.
+swarmkit_repo_url: ""
+swarmkit_repo_version: main
+swarmkit_repo_update: false
+
+swarmkit_min_cmake_version: "3.28.0"
+swarmkit_max_cmake_version: "4.0.0"
+swarmkit_min_gcc_major: 13
+swarmkit_build_packages:
+  - build-essential
+  - gcc
+  - g++
+  - cmake
+  - ninja-build
+  - pkg-config
+  - git
+  - ca-certificates
+  - curl
+  - python3
+  - python3-pip
+  - python3-dev
+  - perl
+  - m4
+  - autoconf
+  - automake
+  - libtool
+  - bison
+  - flex
+  - zip
+  - unzip
+
+swarmkit_python_build_tools:
+  - "conan>=2,<3"
+  - "cmake>=3.28,<4"

@@ -1,0 +1,30 @@
+SwarmKit build workspace
+========================
+
+This node was prepared by Ansible for SwarmKit builds as user {{ swarmkit_build_user }}.
+
+Expected source directory:
+  {{ swarmkit_source_dir }}
+
+If the source tree was not cloned by Ansible:
+  cd {{ swarmkit_workspace_root }}
+  git clone <your-swarmkit-git-url> swarmkit
+
+Normal Raspberry Pi Linux ARM64 build workflow:
+  cd {{ swarmkit_source_dir }}
+  conan install . -of build/conan -s build_type=Debug -s compiler.cppstd=23 --build=missing
+  cmake --preset linux-debug
+  cmake --build --preset linux-debug
+
+Release build and tests:
+  conan install . -of build/conan -s build_type=Release -s compiler.cppstd=23 --build=missing
+  cmake --preset linux-release
+  cmake --build --preset linux-release
+  ctest --preset linux-release --output-on-failure
+
+Notes:
+  - linux-debug and linux-release are architecture-neutral CMake presets.
+  - scripts/ci_package_linux_x86_64.sh names and packages x86_64 artifacts;
+    do not use it for Raspberry Pi ARM64 packages without updating that script.
+  - Conan may compile gRPC, Protobuf, and other dependencies on ARM64 during
+    the first build; allow time and free disk space.
